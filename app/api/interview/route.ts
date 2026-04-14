@@ -8,6 +8,18 @@ const groq = new Groq({
 
 const sessions = new Map();
 
+// Fixed question sequence - each question asked exactly once
+const QUESTION_SEQUENCE = [
+  "What teaching experience do you have?",
+  "What subjects do you enjoy teaching the most?",
+  "How would you describe your teaching style?",
+  "How do you help students who are struggling?",
+  "How do you keep students engaged during lessons?",
+  "What is your teaching philosophy?",
+  "How do you handle frustrated students?",
+  "What makes you a good tutor for Cuemath?"
+];
+
 export async function POST(request: NextRequest) {
   try {
     const { action, sessionId, name, message } = await request.json();
@@ -19,7 +31,7 @@ export async function POST(request: NextRequest) {
         id: newId,
         name: name,
         messages: [],
-        askedQuestions: [],
+        questionIndex: 0,  // Track which question we're on
         exchangeCount: 0,
         createdAt: Date.now()
       });
@@ -45,80 +57,67 @@ export async function POST(request: NextRequest) {
       session.messages.push({ role: 'user', content: message, timestamp: Date.now() });
       session.exchangeCount++;
       
-      const exchangeCount = session.exchangeCount;
+      const currentIndex = session.questionIndex;
       
-      // Build conversation history
-      const history = session.messages.slice(-6).map(m => 
+      // Check if interview is complete
+      if (currentIndex >= QUESTION_SEQUENCE.length) {
+        const completeMsg = "Thank you for your time! This completes our interview. We'll review your responses and get back to you soon.";
+        session.messages.push({ role: 'assistant', content: completeMsg, timestamp: Date.now() });
+        return NextResponse.json({
+          success: true,
+          message: completeMsg,
+          exchangeCount: session.exchangeCount,
+          isComplete: true
+        });
+      }
+      
+      // Get the next question
+      const nextQuestion = QUESTION_SEQUENCE[currentIndex];
+      
+      // Build conversation history for context
+      const history = session.messages.slice(-4).map(m => 
         `${m.role === 'user' ? 'Candidate' : 'Interviewer'}: ${m.content}`
       ).join('\n');
       
-      // Get already asked questions
-      const askedList = session.askedQuestions.join(', ');
+      // Generate a natural acknowledgment + the question
+      let aiResponse = "";
       
-      // Define question sequence (never repeats)
-      const questionSequence = [
-        "What teaching experience do you have?",
-        "What subjects do you enjoy teaching the most?",
-        "How would you describe your teaching style?",
-        "How do you help students who are struggling?",
-        "How do you keep students engaged?",
-        "What is your teaching philosophy?",
-        "How do you handle frustrated students?",
-        "What makes you a good tutor for Cuemath?"
-      ];
-      
-      // Get next question based on how many have been asked
-      const askedCount = session.askedQuestions.length;
-      let nextQuestion = "";
-      
-      if (askedCount < questionSequence.length) {
-        nextQuestion = questionSequence[askedCount];
-      } else {
-        nextQuestion = "Thank you for your time! This completes our interview.";
+      try {
+        const completion = await groq.chat.completions.create({
+          messages: [
+            {
+              role: 'system',
+              content: `You are a friendly AI interviewer. Acknowledge what the candidate said (1 short sentence), then ask the exact question provided.
+
+CONVERSATION: ${history}
+
+Candidate said: "${message}"
+
+Question to ask: "${nextQuestion}"
+
+Your response (acknowledgment + question):`
+            }
+          ],
+          model: 'llama-3.3-70b-versatile',
+          temperature: 0.5,
+          max_tokens: 80,
+        });
+        
+        aiResponse = completion.choices[0]?.message?.content || `Thanks for sharing. ${nextQuestion}`;
+      } catch (err) {
+        aiResponse = `Thanks for sharing. ${nextQuestion}`;
       }
       
-      // Generate response with the next question
-      const completion = await groq.chat.completions.create({
-        messages: [
-          {
-            role: 'system',
-            content: `You are a friendly AI interviewer for Cuemath.
-
-CONVERSATION SO FAR:
-${history}
-
-IMPORTANT RULES:
-1. Acknowledge what the candidate said in ONE short sentence
-2. Then ask EXACTLY this question: "${nextQuestion}"
-3. DO NOT ask any other question
-4. Keep response under 30 words
-
-Example: "Thanks for sharing. What teaching experience do you have?"`
-          },
-          {
-            role: 'user',
-            content: `Candidate said: "${message}"`
-          }
-        ],
-        model: 'llama-3.3-70b-versatile',
-        temperature: 0.5,
-        max_tokens: 100,
-      });
-      
-      let aiResponse = completion.choices[0]?.message?.content || `Thanks for sharing. ${nextQuestion}`;
-      
-      // Store the question asked
-      if (nextQuestion !== "Thank you for your time! This completes our interview.") {
-        session.askedQuestions.push(nextQuestion);
-      }
+      // Store AI response and increment question index
       session.messages.push({ role: 'assistant', content: aiResponse, timestamp: Date.now() });
+      session.questionIndex++;
       
-      const isComplete = exchangeCount >= 8 || askedCount >= questionSequence.length;
+      const isComplete = session.questionIndex >= QUESTION_SEQUENCE.length;
       
       return NextResponse.json({
         success: true,
         message: aiResponse,
-        exchangeCount: exchangeCount,
+        exchangeCount: session.exchangeCount,
         isComplete: isComplete
       });
     }
@@ -129,7 +128,7 @@ Example: "Thanks for sharing. What teaching experience do you have?"`
     console.error('API Error:', error.message);
     return NextResponse.json({ 
       success: true, 
-      message: "What subjects do you enjoy teaching the most?",
+      message: QUESTION_SEQUENCE[0],
       exchangeCount: 0,
       isComplete: false
     });
