@@ -6,17 +6,6 @@ const groq = new Groq({
   apiKey: process.env.GROQ_API_KEY || '',
 });
 
-const QUESTIONS: string[] = [
-  "What teaching experience do you have?",
-  "What subjects do you enjoy teaching the most?",
-  "How would you describe your teaching style?",
-  "How do you help students who are struggling?",
-  "How do you keep students engaged?",
-  "What is your teaching philosophy?",
-  "How do you handle frustrated students?",
-  "What makes you a good tutor for Cuemath?"
-];
-
 interface ChatMessage {
   role: string;
   content: string;
@@ -26,11 +15,73 @@ interface ChatMessage {
 interface SessionData {
   id: string;
   name: string;
-  questionIndex: number;
   messages: ChatMessage[];
+  topicsCovered: string[];
+  lastActivity: number;
 }
 
 const sessions: Map<string, SessionData> = new Map();
+
+// Clean up old sessions
+setInterval(() => {
+  const now = Date.now();
+  for (const [id, session] of sessions.entries()) {
+    if (now - session.lastActivity > 30 * 60 * 1000) {
+      sessions.delete(id);
+    }
+  }
+}, 5 * 60 * 1000);
+
+async function generateConversationalResponse(
+  userMessage: string,
+  history: string,
+  candidateName: string
+): Promise<string> {
+  try {
+    const completion = await groq.chat.completions.create({
+      messages: [
+        {
+          role: 'system',
+          content: `You are a friendly, professional AI interviewer for Cuemath hiring a Tutor.
+
+CONVERSATION HISTORY:
+${history || "Interview just started"}
+
+CANDIDATE NAME: ${candidateName}
+
+IMPORTANT RULES FOR NATURAL CONVERSATION:
+1. Be warm and conversational - like a real human interviewer
+2. Listen to what the candidate says and respond naturally
+3. Ask follow-up questions based on THEIR specific answers
+4. Don't use the same question twice
+5. Keep responses short (1-2 sentences)
+6. Show empathy and understanding
+7. Move the conversation forward naturally
+
+EXAMPLES OF NATURAL RESPONSES:
+- Candidate: "I have 5 years experience" ? "5 years is great! What grade levels did you teach?"
+- Candidate: "I taught high school" ? "High school can be challenging. What subject did you enjoy teaching most?"
+- Candidate: "I need a moment" ? "Of course, take your time. I'll wait right here."
+- Candidate: "I'm not sure" ? "No problem at all. Let me ask differently - what's your favorite part about teaching?"
+
+Your response (natural, conversational, no pre-defined scripts):`
+        },
+        {
+          role: 'user',
+          content: `Candidate said: "${userMessage}"`
+        }
+      ],
+      model: 'llama-3.3-70b-versatile',
+      temperature: 0.8,
+      max_tokens: 120,
+    });
+    
+    return completion.choices[0]?.message?.content || "That's interesting! Could you tell me more about that?";
+  } catch (err) {
+    console.error('Groq error:', err);
+    return "That's interesting! Could you tell me more about your teaching experience?";
+  }
+}
 
 export async function POST(request: NextRequest) {
   try {
@@ -40,18 +91,38 @@ export async function POST(request: NextRequest) {
     // Start interview
     if (action === 'start') {
       const newId: string = uuidv4();
+      const initialMessage = `Hello ${name}! Welcome to your Cuemath Tutor screening interview. I'm excited to learn about you. Could you tell me about your teaching experience?`;
+      
       sessions.set(newId, {
         id: newId,
         name: name,
-        questionIndex: 0,
-        messages: []
+        messages: [{ role: 'assistant', content: initialMessage, timestamp: Date.now() }],
+        topicsCovered: [],
+        lastActivity: Date.now()
       });
 
       return NextResponse.json({
         success: true,
         sessionId: newId,
-        message: `Hello ${name}! Welcome to your Cuemath Tutor screening interview. To start, ${QUESTIONS[0]}`,
+        message: initialMessage,
         exchangeCount: 0
+      });
+    }
+
+    // Get session data
+    if (action === 'get') {
+      const session = sessions.get(sessionId);
+      if (!session) {
+        return NextResponse.json({ error: 'Session not found' }, { status: 400 });
+      }
+      
+      return NextResponse.json({
+        success: true,
+        session: {
+          name: session.name,
+          messages: session.messages,
+          topicsCovered: session.topicsCovered
+        }
       });
     }
 
@@ -62,74 +133,47 @@ export async function POST(request: NextRequest) {
         return NextResponse.json({ error: 'Session expired' }, { status: 400 });
       }
 
-      const currentIndex: number = session.questionIndex;
-      const nextIndex: number = currentIndex + 1;
+      // Store user message
+      session.messages.push({ role: 'user', content: message, timestamp: Date.now() });
+      session.lastActivity = Date.now();
       
-      // Check if interview is complete
-      if (nextIndex >= QUESTIONS.length) {
+      // Build conversation history
+      const history = session.messages.slice(-10).map((m: ChatMessage) => 
+        `${m.role === 'user' ? 'Candidate' : 'Interviewer'}: ${m.content}`
+      ).join('\n');
+      
+      // Generate natural conversational response
+      const aiResponse = await generateConversationalResponse(message, history, session.name);
+      
+      // Store AI response
+      session.messages.push({ role: 'assistant', content: aiResponse, timestamp: Date.now() });
+      
+      // Check if interview should end (after about 8-10 exchanges)
+      const userMessageCount = session.messages.filter(m => m.role === 'user').length;
+      const isComplete = userMessageCount >= 10;
+      
+      if (isComplete) {
+        const completeMsg = "Thank you so much for your time today! This completes our interview. We'll review your responses and get back to you soon. It was great talking with you!";
+        session.messages.push({ role: 'assistant', content: completeMsg, timestamp: Date.now() });
         return NextResponse.json({
           success: true,
-          message: "Thank you for your time! This completes our interview.",
-          exchangeCount: nextIndex,
+          message: completeMsg,
+          exchangeCount: userMessageCount,
           isComplete: true
         });
       }
       
-      const nextQuestion: string = QUESTIONS[nextIndex];
-      
-      // Build conversation history
-      const history = session.messages.slice(-4).map((m: ChatMessage) => 
-        `${m.role === 'user' ? 'Candidate' : 'Interviewer'}: ${m.content}`
-      ).join('\n');
-      
-      // Generate a personalized response using Groq
-      let aiResponse: string = "";
-      
-      try {
-        const completion = await groq.chat.completions.create({
-          messages: [
-            {
-              role: 'system',
-              content: `You are a friendly AI interviewer for Cuemath.
-
-CONVERSATION SO FAR:
-${history}
-
-Candidate just said: "${message}"
-
-INSTRUCTIONS:
-1. Acknowledge what the candidate specifically said (1 sentence)
-2. Then ask this exact question: "${nextQuestion}"
-3. Be warm and natural
-4. Keep response to 2 sentences
-
-Example:
-- Candidate says "2 years experience" ? "2 years is a great start! What subjects do you enjoy teaching the most?"
-- Candidate says "math" ? "Math is a wonderful subject! How would you describe your teaching style?"
-- Candidate says "understand their mentality" ? "That's a thoughtful approach! How do you keep students engaged?"`
-            }
-          ],
-          model: 'llama-3.3-70b-versatile',
-          temperature: 0.7,
-          max_tokens: 100,
-        });
-        
-        aiResponse = completion.choices[0]?.message?.content || `Thanks for sharing. ${nextQuestion}`;
-      } catch (err) {
-        aiResponse = `Thanks for sharing. ${nextQuestion}`;
-      }
-      
-      // Update session
-      session.questionIndex = nextIndex;
-      session.messages.push({ role: 'user', content: message, timestamp: Date.now() });
-      session.messages.push({ role: 'assistant', content: aiResponse, timestamp: Date.now() });
-      
       return NextResponse.json({
         success: true,
         message: aiResponse,
-        exchangeCount: nextIndex,
+        exchangeCount: userMessageCount,
         isComplete: false
       });
+    }
+
+    if (action === 'delete') {
+      sessions.delete(sessionId);
+      return NextResponse.json({ success: true });
     }
 
     return NextResponse.json({ error: 'Invalid action' }, { status: 400 });
@@ -138,7 +182,7 @@ Example:
     console.error('API Error:', error.message);
     return NextResponse.json({ 
       success: true, 
-      message: QUESTIONS[0],
+      message: "That's interesting! Could you tell me more about your teaching experience?",
       exchangeCount: 0,
       isComplete: false
     });

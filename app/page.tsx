@@ -7,31 +7,27 @@ interface Message {
   timestamp: number;
 }
 
-interface SessionData {
+interface SavedInterview {
   id: string;
   name: string;
   date: string;
-  messageCount: number;
-  exchangeCount: number;
+  messages: Message[];
+  assessment: any;
+  duration: number;
 }
 
-interface Assessment {
-  scores: {
-    communication: { score: number; feedback: string };
-    patience: { score: number; feedback: string };
-    simplicity: { score: number; feedback: string };
-    fluency: { score: number; feedback: string };
-    temperament: { score: number; feedback: string };
-  };
-  overallScore: number;
-  recommendation: string;
-  strengths: string[];
-  areasForImprovement: string[];
-  summary: string;
-}
+const QUESTIONS = [
+  "What teaching experience do you have?",
+  "What subjects do you enjoy teaching the most?",
+  "How would you describe your teaching style?",
+  "How do you help students who are struggling?",
+  "How do you keep students engaged?",
+  "What is your teaching philosophy?",
+  "How do you handle frustrated students?",
+  "What makes you a good tutor for Cuemath?"
+];
 
 export default function Home() {
-  // State
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
@@ -39,10 +35,10 @@ export default function Home() {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [candidateName, setCandidateName] = useState('');
   const [exchangeCount, setExchangeCount] = useState(0);
-  const [assessment, setAssessment] = useState<Assessment | null>(null);
-  const [sessions, setSessions] = useState<SessionData[]>([]);
+  const [assessment, setAssessment] = useState<any>(null);
+  const [savedInterviews, setSavedInterviews] = useState<SavedInterview[]>([]);
   const [showHistory, setShowHistory] = useState(false);
-  const [selectedSession, setSelectedSession] = useState<any>(null);
+  const [selectedInterview, setSelectedInterview] = useState<SavedInterview | null>(null);
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [isListening, setIsListening] = useState(false);
   const [timeRemaining, setTimeRemaining] = useState(900);
@@ -50,7 +46,18 @@ export default function Home() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const timerRef = useRef<NodeJS.Timeout | null>(null);
 
-  // Timer
+  // Load history from localStorage
+  const loadHistory = () => {
+    const saved = localStorage.getItem('cuemath_interviews');
+    if (saved) {
+      setSavedInterviews(JSON.parse(saved));
+    }
+  };
+
+  useEffect(() => {
+    loadHistory();
+  }, []);
+
   useEffect(() => {
     if (interviewActive && timeRemaining > 0) {
       timerRef.current = setInterval(() => {
@@ -79,7 +86,6 @@ export default function Home() {
       window.speechSynthesis.cancel();
       const utterance = new SpeechSynthesisUtterance(text);
       utterance.rate = 0.9;
-      utterance.pitch = 1;
       utterance.onstart = () => setIsSpeaking(true);
       utterance.onend = () => setIsSpeaking(false);
       window.speechSynthesis.speak(utterance);
@@ -93,6 +99,128 @@ export default function Home() {
   useEffect(() => {
     scrollToBottom();
   }, [messages]);
+
+  // Download report mid-interview
+  const downloadMidInterviewReport = async () => {
+    if (!sessionId) {
+      alert('No active interview found');
+      return;
+    }
+    
+    try {
+      const res = await fetch('/api/interview', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'get', sessionId })
+      });
+      
+      const data = await res.json();
+      if (data.success && data.session) {
+        const conversation = data.session.messages.map((m: Message) => 
+          `${m.role === 'user' ? 'Candidate' : 'Interviewer'}: ${m.content}`
+        ).join('\n');
+        
+        // Generate assessment for current progress
+        const assessRes = await fetch('/api/assess', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ messages: data.session.messages, name: candidateName })
+        });
+        
+        const assessData = await assessRes.json();
+        
+        const report = `
+================================================================================
+                    CUEMATH TUTOR ASSESSMENT (PARTIAL)
+================================================================================
+
+CANDIDATE: ${candidateName}
+DATE: ${new Date().toLocaleString()}
+STATUS: Interview in progress - Question ${data.session.questionIndex}/${QUESTIONS.length}
+
+================================================================================
+CONVERSATION SO FAR
+================================================================================
+${conversation}
+
+${assessData.assessment ? `
+================================================================================
+PRELIMINARY ASSESSMENT
+================================================================================
+Overall Score: ${assessData.assessment.overallScore}%
+Recommendation: ${assessData.assessment.recommendation}
+
+Scores:
+- Communication: ${assessData.assessment.scores?.communication?.score}/10
+- Patience: ${assessData.assessment.scores?.patience?.score}/10
+- Simplicity: ${assessData.assessment.scores?.simplicity?.score}/10
+- Fluency: ${assessData.assessment.scores?.fluency?.score}/10
+- Temperament: ${assessData.assessment.scores?.temperament?.score}/10
+
+Summary: ${assessData.assessment.summary}
+` : 'Complete more questions for a full assessment.'}
+
+================================================================================
+NOTE: This is a partial report. Complete the full interview for complete assessment.
+================================================================================`;
+        
+        const blob = new Blob([report], { type: 'text/plain' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `Cuemath_Progress_Report_${candidateName}.txt`;
+        a.click();
+        URL.revokeObjectURL(url);
+        alert('Progress report downloaded!');
+      }
+    } catch (error) {
+      console.error('Error generating report:', error);
+      alert('Could not generate report. Please try again.');
+    }
+  };
+
+  const endInterview = async () => {
+    if (timerRef.current) clearInterval(timerRef.current);
+    
+    try {
+      const res = await fetch('/api/assess', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ messages, name: candidateName })
+      });
+      
+      const data = await res.json();
+      if (data.success && data.assessment) {
+        setAssessment(data.assessment);
+        
+        // Save to localStorage
+        const newInterview: SavedInterview = {
+          id: Date.now().toString(),
+          name: candidateName,
+          date: new Date().toLocaleString(),
+          messages: messages,
+          assessment: data.assessment,
+          duration: 900 - timeRemaining
+        };
+        
+        const updated = [newInterview, ...savedInterviews];
+        setSavedInterviews(updated);
+        localStorage.setItem('cuemath_interviews', JSON.stringify(updated));
+      }
+    } catch (error) {
+      console.error('Assessment error:', error);
+    }
+    
+    if (sessionId) {
+      await fetch('/api/interview', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId, action: 'delete' })
+      });
+    }
+    
+    setInterviewActive(false);
+  };
 
   const startInterview = async () => {
     if (!candidateName.trim()) {
@@ -121,7 +249,7 @@ export default function Home() {
         speakText(data.message);
       }
     } catch (error) {
-      console.error('Error:', error);
+      console.error('Error starting interview:', error);
       alert('Failed to start interview');
     } finally {
       setLoading(false);
@@ -153,147 +281,12 @@ export default function Home() {
         if (data.isComplete) {
           endInterview();
         }
-      } else if (data.error) {
-        alert(data.error);
-        resetInterview();
       }
     } catch (error) {
       console.error('Error:', error);
     } finally {
       setLoading(false);
     }
-  };
-
-  const endInterview = async () => {
-    if (timerRef.current) clearInterval(timerRef.current);
-    
-    // Generate assessment
-    const conversation = messages.map(m => `${m.role === 'user' ? 'Candidate' : 'Interviewer'}: ${m.content}`).join('\n');
-    
-    try {
-      const res = await fetch('/api/assess', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ messages, name: candidateName })
-      });
-      
-      const data = await res.json();
-      if (data.success && data.assessment) {
-        setAssessment(data.assessment);
-      }
-    } catch (error) {
-      console.error('Assessment error:', error);
-    }
-    
-    setInterviewActive(false);
-    loadHistory();
-  };
-
-  const loadHistory = async () => {
-    try {
-      const res = await fetch('/api/interview', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'history' })
-      });
-      
-      const data = await res.json();
-      if (data.success) {
-        setSessions(data.sessions);
-      }
-    } catch (error) {
-      console.error('Error loading history:', error);
-    }
-  };
-
-  const viewSessionDetails = async (sessionId: string) => {
-    try {
-      const res = await fetch('/api/interview', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'details', sessionId })
-      });
-      
-      const data = await res.json();
-      if (data.success) {
-        setSelectedSession(data.session);
-      }
-    } catch (error) {
-      console.error('Error loading session:', error);
-    }
-  };
-
-  const deleteSession = async (sessionId: string) => {
-    if (!confirm('Delete this interview?')) return;
-    
-    try {
-      await fetch('/api/interview', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'delete', sessionId })
-      });
-      
-      loadHistory();
-      if (selectedSession?.id === sessionId) {
-        setSelectedSession(null);
-      }
-    } catch (error) {
-      console.error('Error deleting:', error);
-    }
-  };
-
-  const downloadReport = () => {
-    if (!assessment) return;
-    
-    const report = `
-================================================================================
-                        CUEMATH TUTOR ASSESSMENT
-================================================================================
-
-CANDIDATE: ${candidateName}
-DATE: ${new Date().toLocaleString()}
-DURATION: ${formatTime(900 - timeRemaining)}
-
-================================================================================
-SCORES (1-10)
-================================================================================
-Communication: ${assessment.scores.communication.score}/10
-  ${assessment.scores.communication.feedback}
-
-Patience: ${assessment.scores.patience.score}/10
-  ${assessment.scores.patience.feedback}
-
-Simplicity: ${assessment.scores.simplicity.score}/10
-  ${assessment.scores.simplicity.feedback}
-
-Fluency: ${assessment.scores.fluency.score}/10
-  ${assessment.scores.fluency.feedback}
-
-Temperament: ${assessment.scores.temperament.score}/10
-  ${assessment.scores.temperament.feedback}
-
-================================================================================
-OVERALL SCORE: ${assessment.overallScore}/100
-RECOMMENDATION: ${assessment.recommendation}
-================================================================================
-
-STRENGTHS:
-${assessment.strengths.map(s => `  - ${s}`).join('\n')}
-
-AREAS FOR IMPROVEMENT:
-${assessment.areasForImprovement.map(a => `  - ${a}`).join('\n')}
-
-SUMMARY:
-${assessment.summary}
-`;
-    
-    const blob = new Blob([report], { type: 'text/plain' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `Cuemath_Assessment_${candidateName}.txt`;
-    a.click();
-    URL.revokeObjectURL(url);
   };
 
   const startVoiceInput = () => {
@@ -314,6 +307,75 @@ ${assessment.summary}
     recognition.start();
   };
 
+  const deleteInterview = (id: string) => {
+    if (confirm('Delete this interview record?')) {
+      const updated = savedInterviews.filter(i => i.id !== id);
+      setSavedInterviews(updated);
+      localStorage.setItem('cuemath_interviews', JSON.stringify(updated));
+    }
+  };
+
+  const clearAllHistory = () => {
+    if (confirm('Delete ALL interview history?')) {
+      localStorage.removeItem('cuemath_interviews');
+      setSavedInterviews([]);
+    }
+  };
+
+  const downloadFullReport = () => {
+    if (!assessment) return;
+    
+    const report = `
+================================================================================
+                        CUEMATH TUTOR ASSESSMENT
+================================================================================
+
+CANDIDATE: ${candidateName}
+DATE: ${new Date().toLocaleString()}
+DURATION: ${formatTime(900 - timeRemaining)}
+
+================================================================================
+SCORES (1-10)
+================================================================================
+Communication: ${assessment.scores?.communication?.score}/10
+  ${assessment.scores?.communication?.feedback || ''}
+
+Patience: ${assessment.scores?.patience?.score}/10
+  ${assessment.scores?.patience?.feedback || ''}
+
+Simplicity: ${assessment.scores?.simplicity?.score}/10
+  ${assessment.scores?.simplicity?.feedback || ''}
+
+Fluency: ${assessment.scores?.fluency?.score}/10
+  ${assessment.scores?.fluency?.feedback || ''}
+
+Temperament: ${assessment.scores?.temperament?.score}/10
+  ${assessment.scores?.temperament?.feedback || ''}
+
+================================================================================
+OVERALL SCORE: ${assessment.overallScore || 0}/100
+RECOMMENDATION: ${assessment.recommendation || 'N/A'}
+================================================================================
+
+STRENGTHS:
+${assessment.strengths?.map((s: string) => `  - ${s}`).join('\n') || '  - Not specified'}
+
+AREAS FOR IMPROVEMENT:
+${assessment.areasForImprovement?.map((a: string) => `  - ${a}`).join('\n') || '  - Not specified'}
+
+SUMMARY:
+${assessment.summary || 'Assessment completed successfully.'}
+`;
+    
+    const blob = new Blob([report], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `Cuemath_Assessment_${candidateName}.txt`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
   const resetInterview = () => {
     setInterviewActive(false);
     setMessages([]);
@@ -332,10 +394,6 @@ ${assessment.summary}
     }
   };
 
-  useEffect(() => {
-    loadHistory();
-  }, []);
-
   return (
     <div style={{ minHeight: '100vh', background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)', fontFamily: 'Arial, sans-serif' }}>
       {/* Header */}
@@ -346,7 +404,7 @@ ${assessment.summary}
             <p style={{ fontSize: '14px', color: 'rgba(255,255,255,0.8)' }}>Position: Cuemath Tutor | Voice Interview | Smart Assessment</p>
           </div>
           <button onClick={() => { setShowHistory(!showHistory); loadHistory(); }} style={{ padding: '10px 20px', background: showHistory ? 'white' : 'rgba(255,255,255,0.2)', color: showHistory ? '#667eea' : 'white', border: 'none', borderRadius: '10px', cursor: 'pointer', fontWeight: 'bold' }}>
-            ?? History ({sessions.length})
+            ?? History ({savedInterviews.length})
           </button>
         </div>
       </div>
@@ -377,14 +435,14 @@ ${assessment.summary}
           ) : interviewActive ? (
             // Interview Screen
             <div>
-              {/* Progress */}
+              {/* Progress Bar */}
               <div style={{ background: 'rgba(255,255,255,0.1)', borderRadius: '16px', padding: '16px 20px', marginBottom: '20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                 <div>
                   <span style={{ color: 'white', fontSize: '14px' }}>Progress</span>
                   <div style={{ marginTop: '4px', background: 'rgba(255,255,255,0.2)', borderRadius: '10px', height: '6px', width: '150px', overflow: 'hidden' }}>
-                    <div style={{ width: `${(exchangeCount / 10) * 100}%`, height: '100%', background: '#48bb78' }} />
+                    <div style={{ width: `${(exchangeCount / QUESTIONS.length) * 100}%`, height: '100%', background: '#48bb78' }} />
                   </div>
-                  <span style={{ color: 'rgba(255,255,255,0.7)', fontSize: '11px', marginTop: '4px', display: 'block' }}>Question {exchangeCount}/10</span>
+                  <span style={{ color: 'rgba(255,255,255,0.7)', fontSize: '11px', marginTop: '4px', display: 'block' }}>Question {exchangeCount}/{QUESTIONS.length}</span>
                 </div>
                 <div style={{ textAlign: 'center' }}>
                   <span style={{ color: timeRemaining < 120 ? '#f56565' : 'white', fontSize: '28px', fontWeight: 'bold' }}>{formatTime(timeRemaining)}</span>
@@ -396,7 +454,7 @@ ${assessment.summary}
                 </div>
               </div>
 
-              {/* Chat */}
+              {/* Chat Messages */}
               <div style={{ background: 'rgba(255,255,255,0.1)', borderRadius: '24px', padding: '24px', minHeight: '400px', maxHeight: '450px', overflowY: 'auto', marginBottom: '20px' }}>
                 {messages.map((msg, idx) => (
                   <div key={idx} style={{ marginBottom: '16px', display: 'flex', justifyContent: msg.role === 'user' ? 'flex-end' : 'flex-start' }}>
@@ -418,8 +476,8 @@ ${assessment.summary}
                 <div ref={messagesEndRef} />
               </div>
 
-              {/* Input */}
-              <div style={{ display: 'flex', gap: '12px' }}>
+              {/* Input Area */}
+              <div style={{ display: 'flex', gap: '12px', marginBottom: '12px' }}>
                 <button onClick={startVoiceInput} style={{ padding: '12px 20px', background: isListening ? '#f56565' : 'rgba(255,255,255,0.2)', color: 'white', border: 'none', borderRadius: '12px', cursor: 'pointer', fontWeight: 'bold' }}>
                   ?? {isListening ? 'Listening...' : 'Voice'}
                 </button>
@@ -435,9 +493,15 @@ ${assessment.summary}
                 </button>
               </div>
               
-              <button onClick={endInterview} style={{ marginTop: '16px', padding: '10px 20px', background: 'rgba(255,255,255,0.1)', color: 'white', border: 'none', borderRadius: '10px', cursor: 'pointer', width: '100%' }}>
-                End Interview & Get Assessment
-              </button>
+              {/* Action Buttons */}
+              <div style={{ display: 'flex', gap: '12px' }}>
+                <button onClick={downloadMidInterviewReport} style={{ flex: 1, padding: '10px 20px', background: '#4299e1', color: 'white', border: 'none', borderRadius: '10px', cursor: 'pointer', fontWeight: 'bold' }}>
+                  ?? Download Progress Report
+                </button>
+                <button onClick={endInterview} style={{ flex: 1, padding: '10px 20px', background: '#f56565', color: 'white', border: 'none', borderRadius: '10px', cursor: 'pointer', fontWeight: 'bold' }}>
+                  End Interview
+                </button>
+              </div>
             </div>
           ) : assessment ? (
             // Assessment Screen
@@ -457,22 +521,36 @@ ${assessment.summary}
               </div>
 
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: '12px', marginBottom: '24px' }}>
-                {Object.entries(assessment.scores).map(([key, val]: [string, any]) => (
-                  <div key={key} style={{ background: 'rgba(255,255,255,0.1)', borderRadius: '12px', padding: '12px', textAlign: 'center' }}>
-                    <div style={{ fontSize: '24px', fontWeight: 'bold', color: '#48bb78' }}>{val.score}</div>
-                    <div style={{ fontSize: '10px', color: 'white', marginTop: '4px' }}>{key === 'communication' ? 'Comm' : key === 'patience' ? 'Pat' : key === 'simplicity' ? 'Simp' : key === 'fluency' ? 'Flu' : 'Temp'}</div>
-                  </div>
-                ))}
+                <div style={{ textAlign: 'center' }}>
+                  <div style={{ fontSize: '24px', fontWeight: 'bold', color: '#48bb78' }}>{assessment.scores?.communication?.score || '?'}</div>
+                  <div style={{ fontSize: '10px', color: 'white' }}>Comm</div>
+                </div>
+                <div style={{ textAlign: 'center' }}>
+                  <div style={{ fontSize: '24px', fontWeight: 'bold', color: '#48bb78' }}>{assessment.scores?.patience?.score || '?'}</div>
+                  <div style={{ fontSize: '10px', color: 'white' }}>Pat</div>
+                </div>
+                <div style={{ textAlign: 'center' }}>
+                  <div style={{ fontSize: '24px', fontWeight: 'bold', color: '#48bb78' }}>{assessment.scores?.simplicity?.score || '?'}</div>
+                  <div style={{ fontSize: '10px', color: 'white' }}>Simp</div>
+                </div>
+                <div style={{ textAlign: 'center' }}>
+                  <div style={{ fontSize: '24px', fontWeight: 'bold', color: '#48bb78' }}>{assessment.scores?.fluency?.score || '?'}</div>
+                  <div style={{ fontSize: '10px', color: 'white' }}>Flu</div>
+                </div>
+                <div style={{ textAlign: 'center' }}>
+                  <div style={{ fontSize: '24px', fontWeight: 'bold', color: '#48bb78' }}>{assessment.scores?.temperament?.score || '?'}</div>
+                  <div style={{ fontSize: '10px', color: 'white' }}>Temp</div>
+                </div>
               </div>
 
               <div style={{ marginBottom: '16px' }}>
                 <h3 style={{ color: '#48bb78', marginBottom: '8px' }}>? Strengths</h3>
-                {assessment.strengths.map((s, i) => <div key={i} style={{ color: 'rgba(255,255,255,0.8)', marginBottom: '4px' }}>? {s}</div>)}
+                {assessment.strengths?.map((s: string, i: number) => <div key={i} style={{ color: 'rgba(255,255,255,0.8)', marginBottom: '4px' }}>? {s}</div>)}
               </div>
 
               <div style={{ marginBottom: '16px' }}>
                 <h3 style={{ color: '#f56565', marginBottom: '8px' }}>? Areas to Improve</h3>
-                {assessment.areasForImprovement.map((a, i) => <div key={i} style={{ color: 'rgba(255,255,255,0.8)', marginBottom: '4px' }}>? {a}</div>)}
+                {assessment.areasForImprovement?.map((a: string, i: number) => <div key={i} style={{ color: 'rgba(255,255,255,0.8)', marginBottom: '4px' }}>? {a}</div>)}
               </div>
 
               <div style={{ marginBottom: '20px' }}>
@@ -481,7 +559,7 @@ ${assessment.summary}
               </div>
 
               <div style={{ display: 'flex', gap: '12px' }}>
-                <button onClick={downloadReport} style={{ flex: 1, padding: '12px', background: '#48bb78', color: 'white', border: 'none', borderRadius: '12px', cursor: 'pointer', fontWeight: 'bold' }}>
+                <button onClick={downloadFullReport} style={{ flex: 1, padding: '12px', background: '#48bb78', color: 'white', border: 'none', borderRadius: '12px', cursor: 'pointer', fontWeight: 'bold' }}>
                   ?? Download Report
                 </button>
                 <button onClick={resetInterview} style={{ flex: 1, padding: '12px', background: 'white', color: '#667eea', border: 'none', borderRadius: '12px', cursor: 'pointer', fontWeight: 'bold' }}>
@@ -495,23 +573,32 @@ ${assessment.summary}
         {/* History Sidebar */}
         {showHistory && (
           <div style={{ flex: 1, background: 'rgba(255,255,255,0.1)', borderRadius: '24px', padding: '20px', maxHeight: '600px', overflowY: 'auto', backdropFilter: 'blur(10px)' }}>
-            <h3 style={{ color: 'white', marginBottom: '16px' }}>?? Past Interviews</h3>
-            {sessions.length === 0 ? (
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+              <h3 style={{ color: 'white' }}>?? Past Interviews</h3>
+              {savedInterviews.length > 0 && (
+                <button onClick={clearAllHistory} style={{ padding: '4px 12px', background: '#f56565', color: 'white', border: 'none', borderRadius: '6px', cursor: 'pointer', fontSize: '12px' }}>
+                  Clear All
+                </button>
+              )}
+            </div>
+            {savedInterviews.length === 0 ? (
               <p style={{ color: 'rgba(255,255,255,0.6)', textAlign: 'center' }}>No interviews yet</p>
             ) : (
-              sessions.map(session => (
-                <div key={session.id} style={{ background: 'rgba(255,255,255,0.1)', borderRadius: '12px', padding: '12px', marginBottom: '12px' }}>
+              savedInterviews.map(interview => (
+                <div key={interview.id} style={{ background: 'rgba(255,255,255,0.1)', borderRadius: '12px', padding: '12px', marginBottom: '12px' }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                     <div>
-                      <div style={{ fontWeight: 'bold', color: 'white' }}>{session.name}</div>
-                      <div style={{ fontSize: '10px', color: 'rgba(255,255,255,0.6)' }}>{session.date}</div>
-                      <div style={{ fontSize: '11px', color: '#f6ad55' }}>{session.exchangeCount} exchanges</div>
+                      <div style={{ fontWeight: 'bold', color: 'white' }}>{interview.name}</div>
+                      <div style={{ fontSize: '10px', color: 'rgba(255,255,255,0.6)' }}>{interview.date}</div>
+                      <div style={{ fontSize: '11px', color: interview.assessment?.overallScore ? '#48bb78' : '#f6ad55' }}>
+                        {interview.assessment?.overallScore ? `${interview.assessment.overallScore}%` : 'Incomplete'}
+                      </div>
                     </div>
-                    <button onClick={() => deleteSession(session.id)} style={{ padding: '4px 8px', background: 'rgba(245,101,101,0.3)', color: '#f56565', border: 'none', borderRadius: '6px', cursor: 'pointer', fontSize: '11px' }}>
+                    <button onClick={() => deleteInterview(interview.id)} style={{ padding: '4px 8px', background: 'rgba(245,101,101,0.3)', color: '#f56565', border: 'none', borderRadius: '6px', cursor: 'pointer', fontSize: '11px' }}>
                       Delete
                     </button>
                   </div>
-                  <button onClick={() => viewSessionDetails(session.id)} style={{ marginTop: '8px', width: '100%', padding: '6px', background: 'rgba(255,255,255,0.2)', color: 'white', border: 'none', borderRadius: '6px', cursor: 'pointer', fontSize: '11px' }}>
+                  <button onClick={() => setSelectedInterview(interview)} style={{ marginTop: '8px', width: '100%', padding: '6px', background: 'rgba(255,255,255,0.2)', color: 'white', border: 'none', borderRadius: '6px', cursor: 'pointer', fontSize: '11px' }}>
                     View Details
                   </button>
                 </div>
@@ -522,23 +609,33 @@ ${assessment.summary}
       </div>
 
       {/* Session Details Modal */}
-      {selectedSession && (
-        <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,0.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 }} onClick={() => setSelectedSession(null)}>
+      {selectedInterview && (
+        <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,0.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 }} onClick={() => setSelectedInterview(null)}>
           <div style={{ background: 'linear-gradient(135deg, #667eea, #764ba2)', borderRadius: '24px', padding: '32px', maxWidth: '600px', width: '90%', maxHeight: '80%', overflowY: 'auto' }} onClick={(e) => e.stopPropagation()}>
-            <h3 style={{ color: 'white', marginBottom: '8px' }}>{selectedSession.name}</h3>
-            <p style={{ color: 'rgba(255,255,255,0.7)', marginBottom: '16px' }}>{new Date(selectedSession.createdAt).toLocaleString()}</p>
+            <h3 style={{ color: 'white', marginBottom: '8px' }}>{selectedInterview.name}</h3>
+            <p style={{ color: 'rgba(255,255,255,0.7)', marginBottom: '16px' }}>{selectedInterview.date}</p>
             
             <div style={{ marginBottom: '20px' }}>
               <h4 style={{ color: '#48bb78', marginBottom: '8px' }}>Conversation</h4>
-              {selectedSession.messages?.slice(0, 10).map((msg: any, idx: number) => (
+              {selectedInterview.messages.slice(0, 10).map((msg, idx) => (
                 <div key={idx} style={{ marginBottom: '8px', padding: '8px', background: 'rgba(255,255,255,0.1)', borderRadius: '8px' }}>
-                  <strong style={{ color: msg.role === 'user' ? '#48bb78' : '#f6ad55' }}>{msg.role === 'user' ? selectedSession.name : 'AI'}:</strong>
+                  <strong style={{ color: msg.role === 'user' ? '#48bb78' : '#f6ad55' }}>{msg.role === 'user' ? selectedInterview.name : 'AI'}:</strong>
                   <span style={{ color: 'rgba(255,255,255,0.8)', marginLeft: '8px' }}>{msg.content}</span>
                 </div>
               ))}
             </div>
             
-            <button onClick={() => setSelectedSession(null)} style={{ width: '100%', padding: '10px', background: 'white', color: '#667eea', border: 'none', borderRadius: '10px', cursor: 'pointer' }}>
+            {selectedInterview.assessment && (
+              <div style={{ marginBottom: '20px' }}>
+                <h4 style={{ color: '#48bb78', marginBottom: '8px' }}>Assessment</h4>
+                <div style={{ background: 'rgba(255,255,255,0.1)', borderRadius: '8px', padding: '12px' }}>
+                  <div>Score: <strong>{selectedInterview.assessment.overallScore}%</strong></div>
+                  <div>Recommendation: <strong>{selectedInterview.assessment.recommendation}</strong></div>
+                </div>
+              </div>
+            )}
+            
+            <button onClick={() => setSelectedInterview(null)} style={{ width: '100%', padding: '10px', background: 'white', color: '#667eea', border: 'none', borderRadius: '10px', cursor: 'pointer' }}>
               Close
             </button>
           </div>
