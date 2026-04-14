@@ -5,6 +5,17 @@
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.0-3178C6?style=for-the-badge&logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![Groq](https://img.shields.io/badge/Groq-API-F55036?style=for-the-badge&logo=groq&logoColor=white)](https://groq.com/)
 
+## ⚠️ Note for First-Time Visitors
+
+This application uses serverless functions (Vercel). The first request may take **2-5 seconds** to "wake up" the backend. 
+
+**If the page doesn't load immediately:**
+1. Wait 3-5 seconds
+2. Refresh the page
+3. Everything will work normally after that
+
+This is normal behavior for serverless deployments and only affects the very first visit.
+
 ## 📋 Problem Statement (Cuemath Build Challenge - Problem 3)
 
 Cuemath hires hundreds of tutors monthly. Currently, human interviewers conduct 10-minute screening calls, which is **expensive, slow, and hard to scale**.
