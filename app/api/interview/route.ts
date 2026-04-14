@@ -1,7 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
+import Groq from 'groq-sdk';
 import { v4 as uuidv4 } from 'uuid';
 
-// Fixed question sequence - NEVER changes
+const groq = new Groq({
+  apiKey: process.env.GROQ_API_KEY || '',
+});
+
 const QUESTIONS: string[] = [
   "What teaching experience do you have?",
   "What subjects do you enjoy teaching the most?",
@@ -71,12 +75,54 @@ export async function POST(request: NextRequest) {
         });
       }
       
-      // Get the NEXT question
       const nextQuestion: string = QUESTIONS[nextIndex];
-      const aiResponse: string = `Thanks for sharing. ${nextQuestion}`;
+      
+      // Build conversation history
+      const history = session.messages.slice(-4).map((m: ChatMessage) => 
+        `${m.role === 'user' ? 'Candidate' : 'Interviewer'}: ${m.content}`
+      ).join('\n');
+      
+      // Generate a personalized response using Groq
+      let aiResponse: string = "";
+      
+      try {
+        const completion = await groq.chat.completions.create({
+          messages: [
+            {
+              role: 'system',
+              content: `You are a friendly AI interviewer for Cuemath.
+
+CONVERSATION SO FAR:
+${history}
+
+Candidate just said: "${message}"
+
+INSTRUCTIONS:
+1. Acknowledge what the candidate specifically said (1 sentence)
+2. Then ask this exact question: "${nextQuestion}"
+3. Be warm and natural
+4. Keep response to 2 sentences
+
+Example:
+- Candidate says "2 years experience" ? "2 years is a great start! What subjects do you enjoy teaching the most?"
+- Candidate says "math" ? "Math is a wonderful subject! How would you describe your teaching style?"
+- Candidate says "understand their mentality" ? "That's a thoughtful approach! How do you keep students engaged?"`
+            }
+          ],
+          model: 'llama-3.3-70b-versatile',
+          temperature: 0.7,
+          max_tokens: 100,
+        });
+        
+        aiResponse = completion.choices[0]?.message?.content || `Thanks for sharing. ${nextQuestion}`;
+      } catch (err) {
+        aiResponse = `Thanks for sharing. ${nextQuestion}`;
+      }
       
       // Update session
       session.questionIndex = nextIndex;
+      session.messages.push({ role: 'user', content: message, timestamp: Date.now() });
+      session.messages.push({ role: 'assistant', content: aiResponse, timestamp: Date.now() });
       
       return NextResponse.json({
         success: true,
