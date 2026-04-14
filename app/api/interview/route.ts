@@ -6,16 +6,7 @@ const groq = new Groq({
   apiKey: process.env.GROQ_API_KEY || '',
 });
 
-interface SessionData {
-  id: string;
-  name: string;
-  messages: Array<{ role: string; content: string; timestamp: number }>;
-  askedQuestions: string[];
-  exchangeCount: number;
-  createdAt: number;
-}
-
-const sessions = new Map<string, SessionData>();
+const sessions = new Map();
 
 export async function POST(request: NextRequest) {
   try {
@@ -50,35 +41,59 @@ export async function POST(request: NextRequest) {
         return NextResponse.json({ error: 'Session expired' }, { status: 400 });
       }
 
+      // Store user message
       session.messages.push({ role: 'user', content: message, timestamp: Date.now() });
       session.exchangeCount++;
       
       const exchangeCount = session.exchangeCount;
       
-      const history = session.messages.slice(-8).map(m => 
+      // Build conversation history
+      const history = session.messages.slice(-6).map(m => 
         `${m.role === 'user' ? 'Candidate' : 'Interviewer'}: ${m.content}`
       ).join('\n');
       
+      // Get already asked questions
       const askedList = session.askedQuestions.join(', ');
       
+      // Define question sequence (never repeats)
+      const questionSequence = [
+        "What teaching experience do you have?",
+        "What subjects do you enjoy teaching the most?",
+        "How would you describe your teaching style?",
+        "How do you help students who are struggling?",
+        "How do you keep students engaged?",
+        "What is your teaching philosophy?",
+        "How do you handle frustrated students?",
+        "What makes you a good tutor for Cuemath?"
+      ];
+      
+      // Get next question based on how many have been asked
+      const askedCount = session.askedQuestions.length;
+      let nextQuestion = "";
+      
+      if (askedCount < questionSequence.length) {
+        nextQuestion = questionSequence[askedCount];
+      } else {
+        nextQuestion = "Thank you for your time! This completes our interview.";
+      }
+      
+      // Generate response with the next question
       const completion = await groq.chat.completions.create({
         messages: [
           {
             role: 'system',
-            content: `You are a friendly, professional AI interviewer for Cuemath hiring a Tutor.
+            content: `You are a friendly AI interviewer for Cuemath.
 
 CONVERSATION SO FAR:
 ${history}
 
-PREVIOUS QUESTIONS ASKED (DO NOT REPEAT ANY OF THESE):
-${askedList || 'None'}
+IMPORTANT RULES:
+1. Acknowledge what the candidate said in ONE short sentence
+2. Then ask EXACTLY this question: "${nextQuestion}"
+3. DO NOT ask any other question
+4. Keep response under 30 words
 
-RULES:
-1. FIRST, acknowledge what the candidate just said
-2. THEN ask a NEW, DIFFERENT follow-up question
-3. ABSOLUTELY DO NOT repeat any question from the list above
-4. Keep response to 1-2 sentences
-5. Be warm and encouraging`
+Example: "Thanks for sharing. What teaching experience do you have?"`
           },
           {
             role: 'user',
@@ -86,16 +101,19 @@ RULES:
           }
         ],
         model: 'llama-3.3-70b-versatile',
-        temperature: 0.7,
-        max_tokens: 150,
+        temperature: 0.5,
+        max_tokens: 100,
       });
       
-      let aiResponse = completion.choices[0]?.message?.content || "Thanks for sharing. What subjects do you enjoy teaching the most?";
+      let aiResponse = completion.choices[0]?.message?.content || `Thanks for sharing. ${nextQuestion}`;
       
-      session.askedQuestions.push(aiResponse);
+      // Store the question asked
+      if (nextQuestion !== "Thank you for your time! This completes our interview.") {
+        session.askedQuestions.push(nextQuestion);
+      }
       session.messages.push({ role: 'assistant', content: aiResponse, timestamp: Date.now() });
       
-      const isComplete = exchangeCount >= 8;
+      const isComplete = exchangeCount >= 8 || askedCount >= questionSequence.length;
       
       return NextResponse.json({
         success: true,
